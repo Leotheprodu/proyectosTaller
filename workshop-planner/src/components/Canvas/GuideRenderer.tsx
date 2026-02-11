@@ -1,6 +1,4 @@
 "use client";
-
-import React from "react";
 import { Html } from "@react-three/drei";
 import { useStore } from "@nanostores/react";
 import { $guides } from "@/stores/projectStore";
@@ -10,7 +8,7 @@ import { useState, useRef, useEffect } from "react";
 
 function GuideItem({ guide }: { guide: any }) {
   const [hovered, setHovered] = useState(false);
-  const timeoutRef = useRef<NodeJS.Timeout>();
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleEnter = () => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);

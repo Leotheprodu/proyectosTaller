@@ -1,8 +1,7 @@
 "use client";
 
-import React from "react";
 import { useStore } from "@nanostores/react";
-import { $uiStore, setActiveView } from "@/stores/projectStore";
+import { $uiStore } from "@/stores/projectStore";
 import { projectService } from "@/services/projectService";
 import { LayoutTemplate, Box, FileText, Layers } from "lucide-react";
 import clsx from "clsx";

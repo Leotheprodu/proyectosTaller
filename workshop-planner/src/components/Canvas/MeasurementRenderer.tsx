@@ -1,31 +1,180 @@
 "use client";
 
-import React from "react";
+import React, { useRef, useState, useMemo } from "react";
 import { Line, Text, Billboard } from "@react-three/drei";
 import { useStore } from "@nanostores/react";
+import { useFrame, useThree } from "@react-three/fiber";
 import { $measurements, $uiStore } from "@/stores/projectStore";
-import { Vector3 } from "three";
+import { Vector3, Raycaster, Group, Object3D } from "three";
 import { formatDim } from "@/lib/units";
 
 const getLabels = (index: number) => {
   const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   const startIdx = (index * 2) % 26;
   const endIdx = (index * 2 + 1) % 26;
-  const prefix =
-    Math.floor((index * 2) / 26) > 0 ? Math.floor((index * 2) / 26) : "";
-  // Simple handling for now, A-Z then repeat A-Z (confusing but unlikely to exceed 26 pairs in normal use)
   return [letters[startIdx], letters[endIdx]];
 };
+
+// SmartLabel component that handles occlusion
+function SmartLabel({
+  position,
+  children,
+  defaultOffset = 25,
+  avoidanceOffset = 60,
+}: {
+  position: [number, number, number];
+  children: React.ReactNode;
+  defaultOffset?: number;
+  avoidanceOffset?: number;
+}) {
+  const groupRef = useRef<Group>(null);
+  const billboardRef = useRef<Group>(null);
+  // We use useMemo to avoid re-creating raycaster
+  const raycaster = useMemo(() => new Raycaster(), []);
+
+  // Current vertical offset
+  const [currentOffset, setCurrentOffset] = useState(defaultOffset);
+  const targetOffsetRef = useRef(defaultOffset);
+
+  // Check visibility every few frames to save performance
+  useFrame((state) => {
+    const { camera, scene } = state;
+
+    if (
+      !groupRef.current ||
+      !billboardRef.current ||
+      !camera ||
+      !scene ||
+      !raycaster
+    )
+      return;
+
+    try {
+      // Explicitly set camera to raycaster to fix "reading 'near'" error with certain objects
+      raycaster.camera = camera;
+
+      // Get world position of the current visual target (where the text is right now)
+      const visualPos = new Vector3();
+      billboardRef.current.getWorldPosition(visualPos);
+
+      // Ray from camera to visual position
+      const direction = new Vector3().subVectors(visualPos, camera.position);
+      const distanceToTarget = direction.length();
+      direction.normalize();
+
+      raycaster.set(camera.position, direction);
+
+      // Intersect objects - Safety check
+      if (scene.children && scene.children.length > 0) {
+        const hits = raycaster.intersectObjects(scene.children, true);
+
+        if (hits.length > 0) {
+          // Find the first hit that is NOT part of this label
+          const firstValidHit = hits.find((hit) => {
+            // Check if hit object is a child of our group or billboard
+            let obj: Object3D | null = hit.object;
+            while (obj) {
+              if (obj === groupRef.current) return false;
+              obj = obj.parent;
+            }
+            return true; // Use this hit
+          });
+
+          if (firstValidHit) {
+            // If the hit is closer than our target (minus a small margin), we are occluded
+            if (firstValidHit.distance < distanceToTarget - 5) {
+              // We are occluded!
+              targetOffsetRef.current = avoidanceOffset;
+            } else {
+              // Not occluded at current position.
+              // But we should try to go back down if we are up.
+              if (Math.abs(currentOffset - avoidanceOffset) < 1) {
+                // Check default pos
+                const basePos = groupRef.current.position.clone();
+                const defaultPos = basePos.add(
+                  new Vector3(0, defaultOffset, 0),
+                );
+                const dirDefault = new Vector3().subVectors(
+                  defaultPos,
+                  camera.position,
+                );
+                const distDefault = dirDefault.length();
+                dirDefault.normalize();
+
+                raycaster.set(camera.position, dirDefault);
+                const hitsDefault = raycaster.intersectObjects(
+                  scene.children,
+                  true,
+                );
+                const hitDefault = hitsDefault.find((hit) => {
+                  let obj: Object3D | null = hit.object;
+                  while (obj) {
+                    if (obj === groupRef.current) return false;
+                    obj = obj.parent;
+                  }
+                  return true;
+                });
+
+                if (!hitDefault || hitDefault.distance > distDefault - 2) {
+                  // Default is clear! Go down.
+                  targetOffsetRef.current = defaultOffset;
+                }
+              } else {
+                // We are at default (or moving there) and not occluded. Stay default.
+                targetOffsetRef.current = defaultOffset;
+              }
+            }
+          } else {
+            // No hits at all (sky), clear.
+            targetOffsetRef.current = defaultOffset;
+          }
+        }
+      }
+    } catch (e) {
+      // Silently fail raycasting errors to prevent crash
+      // console.warn("SmartLabel Raycast failed", e);
+    }
+
+    // Animate
+    const diff = targetOffsetRef.current - currentOffset;
+    if (Math.abs(diff) > 0.5) {
+      // Smooth lerp
+      setCurrentOffset((prev) => prev + diff * 0.1);
+    }
+  });
+
+  return (
+    <group ref={groupRef} position={position}>
+      {/* Visual Line connecting anchor to label if raised? Optional but nice */}
+      {currentOffset > defaultOffset + 10 && (
+        <Line
+          points={[
+            [0, 0, 0],
+            [0, currentOffset, 0],
+          ]}
+          color="#f59e0b" // Match theme color
+          opacity={0.5}
+          transparent
+          lineWidth={1}
+        />
+      )}
+      <Billboard ref={billboardRef} position={[0, currentOffset, 0]}>
+        {children}
+      </Billboard>
+    </group>
+  );
+}
 
 export function MeasurementRenderer() {
   const measurements = useStore($measurements);
   const ui = useStore($uiStore);
 
+  if (!ui.showDimensions || measurements.length === 0) return null;
+
   return (
     <group>
       {measurements.map((measurement, index) => {
         const [labelA, labelB] = getLabels(index);
-
         const pointA = new Vector3(
           measurement.pointA.x,
           measurement.pointA.y,
@@ -36,22 +185,26 @@ export function MeasurementRenderer() {
           measurement.pointB.y,
           measurement.pointB.z,
         );
-
-        // Midpoint for label
         const midpoint = new Vector3()
           .addVectors(pointA, pointB)
           .multiplyScalar(0.5);
-        // midpoint.y += 20; // Offset above the line - now handled by Billboard position
 
         return (
           <group key={measurement.id}>
-            {/* Yellow line between points */}
-            <Line points={[pointA, pointB]} color="#f59e0b" lineWidth={2} />
+            <Line
+              points={[pointA, pointB]}
+              color="#f59e0b"
+              lineWidth={2}
+              dashed={false}
+            />
 
-            {/* Distance label (Text in 3D) */}
-            <Billboard position={[midpoint.x, midpoint.y + 20, midpoint.z]}>
+            {/* Distance label - Smart */}
+            <SmartLabel
+              position={[midpoint.x, midpoint.y, midpoint.z]}
+              defaultOffset={20}
+              avoidanceOffset={50}
+            >
               <mesh position={[0, 0, -1]} renderOrder={998}>
-                {/* Reduced width from 120 to 80 for tighter padding */}
                 <planeGeometry args={[80, 24]} />
                 <meshBasicMaterial
                   color="#f59e0b"
@@ -62,23 +215,29 @@ export function MeasurementRenderer() {
                 />
               </mesh>
               <Text
-                fontSize={14} // Slightly smaller font
+                fontSize={14}
                 color="white"
                 anchorX="center"
                 anchorY="middle"
                 fontWeight="bold"
                 outlineWidth={1}
                 outlineColor="#b45309"
-                renderOrder={999} // Ensure text is on top of bg
-                depthOffset={-1} // Ensures text renders on top of plane and other objects
+                renderOrder={999}
+                depthOffset={-1}
+                material-depthTest={false}
+                material-depthWrite={false}
+                material-toneMapped={false}
               >
                 {formatDim(measurement.distance, ui.unit)}
               </Text>
-            </Billboard>
+            </SmartLabel>
 
             {/* Endpoint markers A */}
-            {/* Removed red sphere, just text over guide cone */}
-            <Billboard position={[pointA.x, pointA.y + 25, pointA.z]}>
+            <SmartLabel
+              position={[pointA.x, pointA.y, pointA.z]}
+              defaultOffset={25}
+              avoidanceOffset={60}
+            >
               <Text
                 fontSize={16}
                 color="black"
@@ -88,18 +247,21 @@ export function MeasurementRenderer() {
                 outlineWidth={2}
                 outlineColor="white"
                 renderOrder={999}
-                depthOffset={-1} // Keeps pulling text to front
-                material-depthTest={false} // Force disable depth test
-                material-depthWrite={false} // Force disable depth write
-                material-toneMapped={false} // Ignore lighting
+                depthOffset={-1}
+                material-depthTest={false}
+                material-depthWrite={false}
+                material-toneMapped={false}
               >
                 {labelA}
               </Text>
-            </Billboard>
+            </SmartLabel>
 
             {/* Endpoint markers B */}
-            {/* Removed red sphere, just text over guide cone */}
-            <Billboard position={[pointB.x, pointB.y + 25, pointB.z]}>
+            <SmartLabel
+              position={[pointB.x, pointB.y, pointB.z]}
+              defaultOffset={25}
+              avoidanceOffset={60}
+            >
               <Text
                 fontSize={16}
                 color="black"
@@ -109,14 +271,14 @@ export function MeasurementRenderer() {
                 outlineWidth={2}
                 outlineColor="white"
                 renderOrder={999}
-                depthOffset={-1} // Keeps pulling text to front
-                material-depthTest={false} // Force disable depth test
-                material-depthWrite={false} // Force disable depth write
-                material-toneMapped={false} // Ignore lighting
+                depthOffset={-1}
+                material-depthTest={false}
+                material-depthWrite={false}
+                material-toneMapped={false}
               >
                 {labelB}
               </Text>
-            </Billboard>
+            </SmartLabel>
           </group>
         );
       })}

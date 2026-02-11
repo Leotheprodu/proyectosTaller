@@ -16,6 +16,7 @@ interface WorkpieceProps {
     width: number;
     height: number;
     zIndex: number;
+    rotation: number;
   };
   isSelected: boolean;
   onDragEnd: (id: string, x: number, y: number) => void;

@@ -450,7 +450,7 @@ export function SelectionGizmo() {
       {showGizmo && (
         <TransformControls
           ref={transformRef}
-          object={objRef}
+          object={objRef as any}
           mode={mode}
           onMouseDown={handleDragStart}
           onMouseUp={handleDragEnd}
